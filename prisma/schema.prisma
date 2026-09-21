@@ -1,0 +1,604 @@
+// Schéma Prisma — Backend Enseignant
+// Application universitaire de gestion des présences
+// Stack : NestJS + TypeScript + PostgreSQL + Prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// -----------------------------------------------------------------------
+// Enums
+// -----------------------------------------------------------------------
+
+enum UserStatus {
+  active
+  suspended
+}
+
+enum SessionStatus {
+  SCHEDULED
+  ACTIVE
+  CLOSED
+  EXPIRED
+  CANCELLED
+}
+
+enum AttendanceStatus {
+  present
+  late
+  absent
+  rejected
+}
+
+enum RejectionReason {
+  expired_qr
+  duplicate_scan
+  wrong_session
+  unknown_student
+  other
+}
+
+enum ScheduleConflict {
+  teacher
+  room
+}
+
+enum RoomType {
+  CM
+  TD
+}
+
+enum ReportType {
+  session
+  weekly
+  monthly
+  class
+  teacher
+}
+
+enum ReportFormat {
+  pdf
+  xlsx
+  docx
+}
+
+enum ReportStatus {
+  ready
+  generating
+  failed
+}
+
+enum AdminRole {
+  SUPER_ADMIN
+  ADMIN
+  OBSERVATEUR
+}
+
+enum AttendanceMethod {
+  qr
+  manual
+  import_csv
+}
+
+enum FraudType {
+  SCAN_HORS_CRENEAU
+  APPAREIL_PARTAGE
+  COMPTE_MULTI_APPAREILS
+  SCAN_HORS_SITE
+  PRESENCE_SIMULTANEE
+  SCAN_ECLAIR
+  QR_REGENERATIONS_EXCESSIVES
+  PRESENCE_MANUELLE_ABUSIVE
+  COMPTE_SUSPENDU_ACTIF
+  IP_PARTAGEE
+}
+
+enum FraudSeverity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum FraudStatus {
+  OPEN
+  CONFIRMED
+  DISMISSED
+  RESOLVED
+}
+
+enum ActorRole {
+  student
+  class_leader
+  teacher
+  admin
+}
+
+enum ActivityType {
+  attendance_scan
+  qr_generated
+  qr_regenerated
+  session_closed
+  schedule_modified
+  login_external
+  settings_changed
+  admin_login
+  admin_login_failed
+  account_created
+  account_updated
+  account_suspended
+  account_reactivated
+  password_reset
+  leader_assigned
+  attendance_corrected
+  fraud_alert_reviewed
+  report_exported
+}
+
+enum NotificationType {
+  session_imminent
+  qr_available
+  qr_expiring
+  session_cancelled
+  absence_recorded
+  admin_info
+}
+
+// -----------------------------------------------------------------------
+// Établissement & comptes admin
+// -----------------------------------------------------------------------
+
+model Establishment {
+  id        String   @id @default(cuid())
+  name      String
+  isCurrent Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  adminUsers      AdminUser[]
+  students        Student[]
+  teachers        Teacher[]
+  classes         SchoolClass[]
+  subjects        Subject[]
+  sessions        ClassSession[]
+  activityEvents  ActivityEvent[]
+  reportRequests  ReportRequest[]
+  settings        EstablishmentSettings?
+  notifications   Notification[]
+  faculties       Faculty[]
+  programs        Program[]
+  fraudAlerts     FraudAlert[]
+  rooms           Room[]
+}
+
+model AdminUser {
+  id              String     @id @default(cuid())
+  firstName       String
+  lastName        String
+  email           String     @unique
+  passwordHash    String?
+  role            AdminRole  @default(ADMIN)
+  status          UserStatus @default(active)
+  lastLoginAt     DateTime?
+  failedAttempts  Int        @default(0)
+  lockedUntil     DateTime?
+  establishmentId String
+  establishment   Establishment @relation(fields: [establishmentId], references: [id])
+  createdAt       DateTime   @default(now())
+
+  reportRequests  ReportRequest[]
+  reviewedAlerts  FraudAlert[]  @relation("AlertReviewer")
+  correctedRecords AttendanceRecord[] @relation("AttendanceCorrectedBy")
+
+  @@index([establishmentId])
+}
+
+// -----------------------------------------------------------------------
+// Référentiel pédagogique
+// -----------------------------------------------------------------------
+
+model Faculty {
+  id              String   @id @default(cuid())
+  name            String
+  code            String
+  deanName        String?
+  establishmentId String
+  establishment   Establishment @relation(fields: [establishmentId], references: [id])
+  createdAt       DateTime @default(now())
+
+  programs        Program[]
+  subjects        Subject[]
+  teachers        Teacher[]
+
+  @@unique([establishmentId, code])
+  @@index([establishmentId])
+}
+
+model Program {
+  id              String   @id @default(cuid())
+  name            String
+  code            String
+  level           String
+  facultyId       String
+  faculty         Faculty  @relation(fields: [facultyId], references: [id])
+  establishmentId String
+  establishment   Establishment @relation(fields: [establishmentId], references: [id])
+  createdAt       DateTime @default(now())
+
+  classes         SchoolClass[]
+
+  @@unique([establishmentId, code])
+  @@index([facultyId])
+}
+
+model Subject {
+  id              String   @id @default(cuid())
+  name            String
+  code            String   @unique
+  volumeHours     Int
+  credits         Int      @default(0)
+  description     String?
+  facultyId       String?
+  faculty         Faculty? @relation(fields: [facultyId], references: [id])
+  establishmentId String
+  establishment   Establishment @relation(fields: [establishmentId], references: [id])
+
+  teacherLinks    TeacherSubject[]
+  assignments     Assignment[]
+  scheduleEntries ScheduleEntry[]
+  sessions        ClassSession[]
+
+  @@index([establishmentId])
+}
+
+model SchoolClass {
+  id              String   @id @default(cuid())
+  name            String
+  level           String
+  program         String
+  studentCount    Int      @default(0)
+
+  programId       String?
+  programRef      Program? @relation(fields: [programId], references: [id])
+
+  leaderId        String?  @unique
+  leader          Student? @relation("ClassLeader", fields: [leaderId], references: [id])
+
+  deputyLeaderId  String?  @unique
+  deputyLeader    Student? @relation("ClassDeputyLeader", fields: [deputyLeaderId], references: [id])
+
+  establishmentId String
+  establishment   Establishment @relation(fields: [establishmentId], references: [id])
+
+  students        Student[]        @relation("ClassStudents")
+  assignments     Assignment[]
+  scheduleEntries ScheduleEntry[]
+  sessions        ClassSession[]
+
+  @@index([establishmentId])
+}
+
+// -----------------------------------------------------------------------
+// Personnes
+// -----------------------------------------------------------------------
+
+model Teacher {
+  id              String     @id @default(cuid())
+  firstName       String
+  lastName        String
+  email           String     @unique
+  externalUserId  String     @unique
+  passwordHash    String?
+  status          UserStatus @default(active)
+  department      String?
+  hireDate        DateTime?
+  facultyId       String?
+  faculty         Faculty?   @relation(fields: [facultyId], references: [id])
+  establishmentId String
+  establishment   Establishment @relation(fields: [establishmentId], references: [id])
+  createdAt       DateTime   @default(now())
+
+  subjectLinks    TeacherSubject[]
+  assignments     Assignment[]
+  scheduleEntries ScheduleEntry[]
+  sessions        ClassSession[]
+
+  @@index([establishmentId])
+}
+
+model TeacherSubject {
+  teacherId String
+  subjectId String
+  teacher   Teacher @relation(fields: [teacherId], references: [id], onDelete: Cascade)
+  subject   Subject @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+
+  @@id([teacherId, subjectId])
+}
+
+model Student {
+  id              String     @id @default(cuid())
+  matricule       String     @unique
+  firstName       String
+  lastName        String
+  email           String     @unique
+  externalUserId  String     @unique
+  passwordHash    String?
+  status          UserStatus @default(active)
+  createdAt       DateTime   @default(now())
+
+  classId         String
+  class           SchoolClass @relation("ClassStudents", fields: [classId], references: [id])
+
+  establishmentId String
+  establishment   Establishment @relation(fields: [establishmentId], references: [id])
+
+  leaderClass       SchoolClass? @relation("ClassLeader")
+  deputyLeaderClass SchoolClass? @relation("ClassDeputyLeader")
+
+  attendanceRecords AttendanceRecord[]
+  fraudAlerts       FraudAlert[]
+
+  @@index([classId])
+  @@index([establishmentId])
+}
+
+// -----------------------------------------------------------------------
+// Salles (amphis CM, salles TD)
+// -----------------------------------------------------------------------
+
+model Room {
+  id              String   @id @default(cuid())
+  name            String
+  type            RoomType
+  capacity        Int
+  establishmentId String
+  establishment   Establishment @relation(fields: [establishmentId], references: [id])
+  createdAt       DateTime @default(now())
+
+  scheduleEntries ScheduleEntry[]
+
+  @@unique([establishmentId, name])
+  @@index([establishmentId])
+}
+
+// -----------------------------------------------------------------------
+// Affectations & emploi du temps
+// -----------------------------------------------------------------------
+
+model Assignment {
+  id        String @id @default(cuid())
+  teacherId String
+  subjectId String
+  classId   String
+
+  teacher   Teacher     @relation(fields: [teacherId], references: [id])
+  subject   Subject     @relation(fields: [subjectId], references: [id])
+  class     SchoolClass @relation(fields: [classId], references: [id])
+
+  @@unique([teacherId, subjectId, classId])
+}
+
+model ScheduleEntry {
+  id          String            @id @default(cuid())
+  classId     String
+  subjectId   String
+  teacherId   String
+  roomId      String
+  sessionType RoomType          @default(TD)
+  dayOfWeek   Int
+  startTime   String
+  endTime     String
+  conflict    ScheduleConflict?
+
+  class       SchoolClass @relation(fields: [classId], references: [id])
+  subject     Subject     @relation(fields: [subjectId], references: [id])
+  teacher     Teacher     @relation(fields: [teacherId], references: [id])
+  room        Room        @relation(fields: [roomId], references: [id])
+
+  @@index([classId])
+  @@index([teacherId])
+  @@index([roomId, dayOfWeek])
+}
+
+// -----------------------------------------------------------------------
+// Séances & présence QR
+// -----------------------------------------------------------------------
+
+model ClassSession {
+  id             String        @id @default(cuid())
+  classId        String
+  subjectId      String
+  teacherId      String
+  room           String
+  date           DateTime      @db.Date
+  startTime      String
+  endTime        String
+  status         SessionStatus @default(SCHEDULED)
+  expectedCount  Int
+
+  qrTokenHash    String?
+  qrGeneratedAt  DateTime?
+  qrValidUntil   DateTime?
+  qrRegenerations Int          @default(0)
+
+  establishmentId String
+  establishment   Establishment @relation(fields: [establishmentId], references: [id])
+
+  class      SchoolClass @relation(fields: [classId], references: [id])
+  subject    Subject     @relation(fields: [subjectId], references: [id])
+  teacher    Teacher     @relation(fields: [teacherId], references: [id])
+
+  attendanceRecords AttendanceRecord[]
+  fraudAlerts       FraudAlert[]
+
+  @@index([classId, date])
+  @@index([establishmentId])
+  @@index([teacherId, date])
+}
+
+model AttendanceRecord {
+  id               String            @id @default(cuid())
+  sessionId        String
+  studentId        String
+  scannedAt        DateTime?
+  status           AttendanceStatus
+  rejectionReason  RejectionReason?
+
+  // --- Traçabilité anti-fraude (toutes optionnelles : migration additive) ---
+  method             AttendanceMethod @default(qr)
+  deviceFingerprint  String?
+  ipAddress          String?
+  userAgent          String?
+  latitude           Float?
+  longitude          Float?
+  accuracyMeters     Int?
+
+  // --- Correction administrative ---
+  correctedById    String?
+  correctedBy      AdminUser? @relation("AttendanceCorrectedBy", fields: [correctedById], references: [id])
+  correctedAt      DateTime?
+  correctionNote   String?
+  updatedAt        DateTime   @updatedAt
+
+  session          ClassSession @relation(fields: [sessionId], references: [id])
+  student          Student      @relation(fields: [studentId], references: [id])
+  fraudAlerts      FraudAlert[]
+
+  @@unique([sessionId, studentId])
+  @@index([sessionId])
+  @@index([studentId])
+  @@index([deviceFingerprint])
+  @@index([ipAddress])
+}
+
+// -----------------------------------------------------------------------
+// Rapports & journal d'activité
+// -----------------------------------------------------------------------
+
+model ReportRequest {
+  id           String       @id @default(cuid())
+  type         ReportType
+  format       ReportFormat
+  scopeLabel   String
+  requestedAt  DateTime     @default(now())
+  status       ReportStatus @default(generating)
+  fileSizeKb   Int?
+  fileUrl      String?
+
+  requestedById   String
+  requestedBy     AdminUser @relation(fields: [requestedById], references: [id])
+
+  establishmentId String
+  establishment   Establishment @relation(fields: [establishmentId], references: [id])
+
+  @@index([establishmentId])
+}
+
+model Notification {
+  id                      String           @id @default(cuid())
+  type                    NotificationType
+  title                   String
+  body                    String
+  read                    Boolean          @default(false)
+  createdAt               DateTime         @default(now())
+
+  recipientExternalUserId String
+  establishmentId         String
+  establishment           Establishment    @relation(fields: [establishmentId], references: [id])
+
+  @@index([recipientExternalUserId, read])
+  @@index([establishmentId])
+}
+
+model EstablishmentSettings {
+  id              String   @id @default(cuid())
+  establishmentId String   @unique
+  establishment   Establishment @relation(fields: [establishmentId], references: [id])
+
+  qrDefaultValidityMinutes Int     @default(20)
+  qrAutoRotate             Boolean @default(false)
+
+  lateToleranceMinutes     Int     @default(10)
+  autoCloseSessions        Boolean @default(true)
+  allowManualAttendance    Boolean @default(true)
+  attendanceAlertThreshold Int     @default(70)
+  academicYear             String  @default("2025-2026")
+  currentSemester          String  @default("S1")
+  defaultExportFormat      String  @default("pdf")
+
+  // --- Anti-fraude ---
+  fraudDetectionEnabled    Boolean @default(true)
+  campusLatitude           Float?
+  campusLongitude          Float?
+  campusRadiusMeters       Int     @default(500)
+  maxDevicesPerStudent     Int     @default(2)
+  maxQrRegenerations       Int     @default(3)
+  burstScanWindowSeconds   Int     @default(15)
+  burstScanThreshold       Int     @default(5)
+
+  notifyImminentSession   Boolean @default(true)
+  notifyQrExpiring        Boolean @default(true)
+  notifyCancelledSession  Boolean @default(true)
+
+  updatedAt DateTime @updatedAt
+}
+
+model ActivityEvent {
+  id              String       @id @default(cuid())
+  type            ActivityType
+  actorName       String
+  actorRole       ActorRole
+  targetLabel     String
+  timestamp       DateTime     @default(now())
+
+  establishmentId String
+  establishment   Establishment @relation(fields: [establishmentId], references: [id])
+
+  @@index([establishmentId, timestamp])
+}
+
+
+// -----------------------------------------------------------------------
+// Anti-fraude
+// -----------------------------------------------------------------------
+
+model FraudAlert {
+  id              String        @id @default(cuid())
+  /// Empreinte déterministe de l'alerte : évite les doublons entre 2 passages du détecteur
+  signature       String        @unique
+  type            FraudType
+  severity        FraudSeverity
+  status          FraudStatus   @default(OPEN)
+  title           String
+  description     String
+  /// Preuves brutes (appareils, horodatages, distances...) sérialisées en JSON
+  evidence        Json
+  detectedAt      DateTime      @default(now())
+
+  establishmentId String
+  establishment   Establishment @relation(fields: [establishmentId], references: [id])
+
+  sessionId       String?
+  session         ClassSession? @relation(fields: [sessionId], references: [id])
+
+  studentId       String?
+  student         Student?      @relation(fields: [studentId], references: [id])
+
+  attendanceRecordId String?
+  attendanceRecord   AttendanceRecord? @relation(fields: [attendanceRecordId], references: [id])
+
+  reviewedById    String?
+  reviewedBy      AdminUser?    @relation("AlertReviewer", fields: [reviewedById], references: [id])
+  reviewedAt      DateTime?
+  reviewNote      String?
+
+  @@index([establishmentId, status])
+  @@index([establishmentId, detectedAt])
+  @@index([sessionId])
+  @@index([studentId])
+}
